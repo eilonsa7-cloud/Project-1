@@ -661,7 +661,14 @@ Rules:
 - If there are no clear tasks, just ask what they want to do about it
 - Support Hebrew fully — detect it and respond in Hebrew when used
 - Never lecture or moralize
-- If user writes in Hebrew, respond ENTIRELY in Hebrew`;
+- If user writes in Hebrew, respond ENTIRELY in Hebrew
+
+CRITICAL — avoid duplicate tasks:
+- You will receive the user's current task list at the start of each message
+- Before adding any task, check if a similar task already exists (same subject/intent)
+- If it already exists, do NOT add it again — even if the wording is slightly different
+- Only emit a \`\`\`tasks block if there are genuinely NEW tasks to add
+- If everything mentioned is already in the list, just reply conversationally — no tasks block`;
 
 // ============================================================
 // INIT
@@ -758,19 +765,34 @@ async function sendMessage() {
     conversation.push({ role: 'assistant', content: reply });
 
     if (newTasks.length > 0) {
-      newTasks.forEach(t => {
-        tasks.push({
-          id: Date.now() + Math.random(),
-          text: t.text,
-          priority: t.priority || 'today',
-          done: false,
-          created: new Date().toISOString()
+      const normalize = s => s.toLowerCase().replace(/[\s\u0591-\u05C7]/g, ' ').replace(/\s+/g, ' ').trim();
+      const existingNorm = tasks.filter(t => !t.done).map(t => normalize(t.text));
+
+      const deduped = newTasks.filter(t => {
+        const n = normalize(t.text);
+        // Skip if any existing task shares 60%+ of words
+        return !existingNorm.some(existing => {
+          const newWords = new Set(n.split(' '));
+          const exWords = existing.split(' ');
+          const shared = exWords.filter(w => newWords.has(w)).length;
+          return exWords.length > 0 && shared / exWords.length >= 0.6;
         });
       });
-      saveTasks();
-      renderTasks();
 
-      const countEl = addMsg(`✅ Added ${newTasks.length} task${newTasks.length > 1 ? 's' : ''} to your list`, 'system-note');
+      if (deduped.length > 0) {
+        deduped.forEach(t => {
+          tasks.push({
+            id: Date.now() + Math.random(),
+            text: t.text,
+            priority: t.priority || 'today',
+            done: false,
+            created: new Date().toISOString()
+          });
+        });
+        saveTasks();
+        renderTasks();
+        addMsg(`✅ Added ${deduped.length} task${deduped.length > 1 ? 's' : ''} to your list`, 'system-note');
+      }
     }
 
     scrollChat();
@@ -786,10 +808,16 @@ async function callClaude(messages) {
     dangerouslyAllowBrowser: true
   });
 
+  // Inject current task list so Claude can avoid duplicates
+  const activeTasks = tasks.filter(t => !t.done);
+  const taskContext = activeTasks.length > 0
+    ? `\n\nCurrent task list (DO NOT duplicate these):\n${activeTasks.map(t => `- [${t.priority}] ${t.text}`).join('\n')}`
+    : '\n\nCurrent task list: (empty)';
+
   const response = await client.messages.create({
     model: 'claude-opus-4-6',
     max_tokens: 1024,
-    system: SYSTEM_PROMPT,
+    system: SYSTEM_PROMPT + taskContext,
     messages: messages.slice(-20)
   });
 
